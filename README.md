@@ -158,6 +158,6 @@ pssh -L 8080:localhost:80 user@host       # port forwarding
 pssh -o "ProxyCommand=..." user@host      # any SSH option
 ```
 
-## License
 
-MIT
+
+# nix support comming soon
