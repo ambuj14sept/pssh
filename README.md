@@ -1,5 +1,9 @@
 # pssh — Persistent SSH
 
+[![License](https://img.shields.io/badge/license-WTFPL-blue.svg)](LICENSE)
+[![Language](https://img.shields.io/badge/language-Bash-4EAA25.svg?logo=gnu-bash&logoColor=white)](https://www.gnu.org/software/bash/)
+[![Nix](https://img.shields.io/badge/nix-supported-5277C3.svg?logo=nixos&logoColor=white)](https://nixos.org/)
+
 Drop-in SSH replacement that gives you VS Code-like session persistence in your terminal.
 
 **Your sessions survive connection drops, laptop sleep, and WiFi changes — automatically.**
@@ -160,4 +164,33 @@ pssh -o "ProxyCommand=..." user@host      # any SSH option
 
 
 
-# nix support comming soon
+## Nix Installation
+
+### Quick run (no installation)
+
+```bash
+nix run github:ambuj14sept/pssh -- <args>
+```
+
+### Install via Flake
+
+Add to your flake inputs:
+
+```nix
+{
+  inputs.pssh.url = "github:ambuj14sept/pssh";
+
+  outputs = { self, nixpkgs, pssh }: {
+    # For home-manager or nixos configuration
+    home.packages = [ pssh.packages.x86_64-linux.default ];
+    # or
+    environment.systemPackages = [ pssh.packages.x86_64-linux.default ];
+  };
+}
+```
+
+Or install directly:
+
+```bash
+nix profile install github:ambuj14sept/pssh
+```
