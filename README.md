@@ -5,12 +5,12 @@ Drop-in SSH replacement that gives you VS Code-like session persistence in your 
 **Your sessions survive connection drops, laptop sleep, and WiFi changes — automatically.**
 
 ```
-Your Mac                          Linux Server
+Your Machine                      Linux Server
 ┌─────────────┐    SSH tunnel     ┌──────────────────────┐
-│             │ ←──────────────→  │  tmux session (auto)  │
-│  pssh       │    drops?         │  ├── ./binary-1       │
-│  (reconnect │    reconnects &   │  └── keeps running    │
-│   loop)     │    reattaches     │                       │
+│             │ ←──────────────→  │  psshd (Go daemon)   │
+│  pssh       │    drops?         │  ├── Session 1       │
+│  (Go)       │    reconnects &   │  ├── Session 2       │
+│             │    reattaches     │  └── keeps running   │
 └─────────────┘                   └──────────────────────┘
 ```
 
@@ -29,27 +29,53 @@ Your Mac                          Linux Server
 - **Multiple terminals?** Each gets its own independent persistent session
 - **Multiple servers?** Works naturally — just use different hosts
 - **No configuration** — no session names, no config files, nothing to manage
-
-You never see or manage tmux. It's completely invisible.
+- **Zero dependencies** — auto-deploys its own daemon, no tmux/apt/yum needed
 
 ## Install
+
+### Prerequisites
+
+- Go 1.18+ (for building)
+- SSH access to your servers
+- No dependencies required on remote servers!
+
+### Build from Source
 
 ```bash
 # Clone
 git clone https://github.com/ambuj14sept/pssh.git
 cd pssh
 
-# Install (symlinks to /usr/local/bin + adds shell aliases)
-./install.sh
+# Build
+make build
+
+# Install system-wide
+sudo make install
+
+# Or use locally
+./bin/pssh user@server
 ```
 
-**Requirement:** `tmux` must be installed on the remote server(s):
-```bash
-# Ubuntu/Debian
-sudo apt install tmux
+### Build Output
 
-# CentOS/RHEL
-sudo yum install tmux
+```
+bin/
+├── pssh     # Client binary (9MB, embeds daemon)
+└── psshd    # Daemon binary (3MB, deployed to servers)
+```
+
+## Uninstall
+
+```bash
+sudo rm /usr/local/bin/pssh
+rm -rf ~/.pssh/
+```
+
+**Note:** The daemon (`~/.pssh/psshd`) on remote servers is not automatically removed.
+To clean up a specific server:
+```bash
+pssh kill user@server --all
+ssh user@server 'rm -rf ~/.pssh/'
 ```
 
 ## Usage
@@ -62,6 +88,24 @@ pssh user@server -- ./run-api       # run a binary persistently
 pssh -p 2222 user@host              # custom SSH port
 pssh -i ~/.ssh/mykey user@host      # custom SSH key
 ```
+
+### First Connection — Auto-Deploy
+
+On the first connection to a server, `pssh` automatically:
+1. Uploads the embedded daemon binary via SCP
+2. Starts the daemon (`psshd`) in the background
+3. Connects you to a new persistent session
+
+```bash
+$ pssh user@server
+[pssh] Deploying daemon to remote server...
+[pssh] Daemon uploaded successfully
+[pssh] Starting daemon...
+[pssh] Session pssh_1710345678_12345 established. Type exit to end.
+user@server:~$ 
+```
+
+Subsequent connections reuse the already-running daemon.
 
 ### Multiple sessions across servers
 
@@ -105,10 +149,11 @@ pssh status
 | Scenario | What happens |
 |----------|-------------|
 | Close MacBook lid | Session keeps running on server. pssh auto-reconnects when you open it |
-| WiFi drops | Auto-reconnects with exponential backoff (1s → 2s → 4s → ... → 30s cap) |
+| WiFi drops | Auto-reconnects with exponential backoff (1s → 2s → 4s → ... → 30s cap). Press **Enter** to retry immediately, **q** to quit |
 | Type `exit` | Session destroyed on server, pssh exits cleanly |
 | Ctrl-C | Sent to the running binary (normal behavior), session stays alive |
 | Mac reboots | Sessions still running on server. Use `pssh list` + `pssh attach` to reconnect |
+| Server reboots | Daemon stops, sessions lost. Reconnect with `pssh` to restart daemon |
 
 ## Retry behavior
 
@@ -125,26 +170,24 @@ Attempt 6:  wait 30s → retry   ← max delay cap
 Attempt 50: wait 30s → gives up
 ```
 
+During any retry wait, press **Enter** to retry immediately or **q** to stop retrying and quit.
+
 ~25 minutes of retrying before it gives up. Even then, your session is still alive on the server — reattach with `pssh attach`.
-
-## Shell aliases
-
-The installer adds these shortcuts to your shell:
-
-| Alias | Command |
-|-------|---------|
-| `pl` | `pssh list` |
-| `pa` | `pssh attach` |
-| `pk` | `pssh kill` |
-| `ps_status` | `pssh status` |
 
 ## How it works
 
-1. When you run `pssh user@server`, it creates a tmux session on the server with an auto-generated unique name
-2. SSH connects with aggressive keepalive settings to detect drops fast
-3. If SSH exits with a non-zero code (connection dropped), pssh retries the connection and reattaches to the same tmux session
-4. If SSH exits with code 0 (user typed `exit`), pssh checks if the tmux session still exists — if not, it exits cleanly
-5. All of this is invisible to you — it feels like a normal SSH session that never breaks
+1. **First connect**: `pssh` SSHs to server, uploads the `psshd` daemon binary to `~/.pssh/`, and starts it
+2. **Daemon**: Runs on the server, manages PTY sessions via Unix socket at `~/.pssh/psshd.sock`
+3. **Session**: Client creates/attaches to a session, proxies stdin/stdout through the daemon
+4. **Reconnect**: If SSH drops, client detects it, re-SSHs, and reattaches to the same session
+5. **Cleanup**: When you type `exit`, the session ends and daemon cleans up
+
+**Key differences from original bash version:**
+- ❌ No tmux dependency (replaced with custom Go daemon)
+- ❌ No cron setup (daemon starts on-demand, like VS Code)
+- ✅ Single binary (client embeds daemon)
+- ✅ Better error handling and logging
+- ✅ Cross-platform (Linux, macOS, BSD)
 
 ## SSH options pass-through
 
@@ -158,6 +201,85 @@ pssh -L 8080:localhost:80 user@host       # port forwarding
 pssh -o "ProxyCommand=..." user@host      # any SSH option
 ```
 
+## Development
 
+### Build
 
-# nix support comming soon
+```bash
+# Build both binaries
+make build
+
+# Build just daemon
+make build-daemon
+
+# Build just client (requires daemon already built)
+make build-client
+```
+
+### Test
+
+```bash
+make test
+```
+
+### Format code
+
+```bash
+make fmt
+```
+
+### Clean build artifacts
+
+```bash
+make clean
+```
+
+## Project Structure
+
+```
+pssh/
+├── cmd/
+│   ├── pssh/          # Client CLI entry point
+│   └── psshd/         # Daemon entry point
+├── pkg/
+│   ├── protocol/      # JSON message protocol
+│   ├── daemon/        # Server-side session management
+│   ├── client/        # SSH, deployment, session proxy
+│   └── config/        # Configuration and paths
+├── bin/               # Build output
+├── Makefile
+├── go.mod
+└── README.md
+```
+
+## Architecture
+
+```
+Client (local machine)          Server (remote)
+┌─────────────────┐             ┌─────────────────┐
+│ pssh binary     │──SSH──→     │ ~/.pssh/psshd   │
+│ (embeds psshd)  │             │ (Go daemon)     │
+│                 │             │                 │
+│ - SSH connect   │             │ - Unix socket   │
+│ - Deploy/start  │             │ - PTY sessions  │
+│ - Proxy I/O     │             │ - JSON protocol │
+└─────────────────┘             └─────────────────┘
+```
+
+The client embeds the daemon binary using Go's `//go:embed` directive. On first connect, it SCPs the daemon to the server and starts it. The daemon persists sessions and survives SSH disconnections.
+
+## Requirements
+
+**Local machine:**
+- SSH client
+- Terminal with PTY support
+
+**Remote server:**
+- SSH server
+- Nothing else! The daemon is auto-deployed.
+
+**No root required** — daemon runs in user space.
+
+## License
+
+WTFPL - Do What The F*ck You Want To Public License

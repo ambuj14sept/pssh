@@ -1,0 +1,26 @@
+# Binaries
+bin/
+pkg/client/psshd
+pssh
+psshd
+*.exe
+
+# Go
+*.test
+*.out
+vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test coverage
+coverage.txt
+coverage.html
