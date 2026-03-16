@@ -22,6 +22,9 @@ type Session struct {
 	target     string
 	isAttached bool
 	oldState   *term.State
+	conn       net.Conn
+	encoder    *json.Encoder
+	decoder    *json.Decoder
 }
 
 func NewSession(client *ssh.Client, target string) *Session {
@@ -38,17 +41,31 @@ func (s *Session) Create(command []string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to connect to daemon: %w", err)
 	}
-	defer conn.Close()
 
 	encoder := json.NewEncoder(conn)
 	decoder := json.NewDecoder(conn)
 
 	cols, rows := getTerminalSize()
 
+	// Forward TERM and locale settings to the remote session
+	termVal := os.Getenv("TERM")
+	if termVal == "" {
+		termVal = "xterm-256color"
+	}
+
+	envVars := make(map[string]string)
+	for _, key := range []string{"LANG", "LC_ALL", "LC_CTYPE", "COLORTERM"} {
+		if val := os.Getenv(key); val != "" {
+			envVars[key] = val
+		}
+	}
+
 	req := protocol.CreateSessionRequest{
 		Command: command,
 		Cols:    cols,
 		Rows:    rows,
+		Term:    termVal,
+		Env:     envVars,
 	}
 
 	hello, _ := protocol.NewMessage(protocol.MessageTypeHello, &protocol.HelloPayload{
@@ -57,6 +74,17 @@ func (s *Session) Create(command []string) (string, error) {
 	})
 	if err := encoder.Encode(hello); err != nil {
 		return "", fmt.Errorf("failed to send hello: %w", err)
+	}
+
+	// Read hello ack
+	var helloResp protocol.Message
+	if err := decoder.Decode(&helloResp); err != nil {
+		return "", fmt.Errorf("failed to read hello response: %w", err)
+	}
+	if helloResp.Type == protocol.MessageTypeError {
+		var errPayload protocol.ErrorPayload
+		json.Unmarshal(helloResp.Payload, &errPayload)
+		return "", fmt.Errorf("hello rejected: %s", errPayload.Error)
 	}
 
 	msg, _ := protocol.NewMessage(protocol.MessageTypeCreateSession, req)
@@ -86,6 +114,9 @@ func (s *Session) Create(command []string) (string, error) {
 
 	s.sessionID = createResp.SessionID
 	s.isAttached = true
+	s.conn = conn
+	s.encoder = encoder
+	s.decoder = decoder
 
 	return createResp.SessionID, nil
 }
@@ -94,11 +125,16 @@ func (s *Session) Attach(sessionID string) error {
 	s.sessionID = sessionID
 	sockPath := fmt.Sprintf("/home/%s/.pssh/psshd.sock", s.target)
 
+	// Close any existing connection from a previous session
+	if s.conn != nil {
+		s.conn.Close()
+		s.conn = nil
+	}
+
 	conn, err := s.dialUnixSocket(sockPath)
 	if err != nil {
 		return fmt.Errorf("failed to connect to daemon: %w", err)
 	}
-	defer conn.Close()
 
 	encoder := json.NewEncoder(conn)
 	decoder := json.NewDecoder(conn)
@@ -116,47 +152,67 @@ func (s *Session) Attach(sessionID string) error {
 		ClientID: fmt.Sprintf("pssh-client-%d", os.Getpid()),
 	})
 	if err := encoder.Encode(hello); err != nil {
+		conn.Close()
 		return fmt.Errorf("failed to send hello: %w", err)
+	}
+
+	// Read hello ack
+	var helloResp protocol.Message
+	if err := decoder.Decode(&helloResp); err != nil {
+		conn.Close()
+		return fmt.Errorf("failed to read hello response: %w", err)
+	}
+	if helloResp.Type == protocol.MessageTypeError {
+		var errPayload protocol.ErrorPayload
+		json.Unmarshal(helloResp.Payload, &errPayload)
+		conn.Close()
+		return fmt.Errorf("hello rejected: %s", errPayload.Error)
 	}
 
 	msg, _ := protocol.NewMessage(protocol.MessageTypeAttachSession, req)
 	if err := encoder.Encode(msg); err != nil {
+		conn.Close()
 		return fmt.Errorf("failed to send attach session: %w", err)
 	}
 
 	var resp protocol.Message
 	if err := decoder.Decode(&resp); err != nil {
+		conn.Close()
 		return fmt.Errorf("failed to read response: %w", err)
 	}
 
 	if resp.Type == protocol.MessageTypeError {
 		var errPayload protocol.ErrorPayload
 		json.Unmarshal(resp.Payload, &errPayload)
+		conn.Close()
 		return fmt.Errorf("failed to attach session: %s", errPayload.Error)
 	}
 
 	s.isAttached = true
+	s.conn = conn
+	s.encoder = encoder
+	s.decoder = decoder
 
 	return nil
 }
 
 func (s *Session) Run() (int, error) {
-	sockPath := fmt.Sprintf("/home/%s/.pssh/psshd.sock", s.target)
-
-	conn, err := s.dialUnixSocket(sockPath)
-	if err != nil {
-		return 1, fmt.Errorf("failed to connect to daemon: %w", err)
+	if s.conn == nil || s.encoder == nil || s.decoder == nil {
+		return 1, fmt.Errorf("no active connection; call Create() or Attach() first")
 	}
-	defer conn.Close()
 
-	encoder := json.NewEncoder(conn)
-	decoder := json.NewDecoder(conn)
+	defer func() {
+		s.conn.Close()
+		s.conn = nil
+		s.encoder = nil
+		s.decoder = nil
+	}()
 
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return s.runNonInteractive(encoder, decoder)
+		return s.runNonInteractive(s.encoder, s.decoder)
 	}
 
-	return s.runInteractive(encoder, decoder)
+	return s.runInteractive(s.encoder, s.decoder)
 }
 
 func (s *Session) runInteractive(encoder *json.Encoder, decoder *json.Decoder) (int, error) {
@@ -299,20 +355,26 @@ func (s *Session) dialUnixSocket(sockPath string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer session.Close()
+	// NOTE: Do NOT defer session.Close() here. The session's lifetime is
+	// managed by the returned sshUnixSocket, whose Close() method handles
+	// closing the session. Closing it here would kill the "nc -U" process
+	// immediately, making the returned connection dead (EOF on first I/O).
 
 	stdin, err := session.StdinPipe()
 	if err != nil {
+		session.Close()
 		return nil, err
 	}
 
 	stdout, err := session.StdoutPipe()
 	if err != nil {
+		session.Close()
 		return nil, err
 	}
 
 	err = session.Start(fmt.Sprintf("nc -U %s", sockPath))
 	if err != nil {
+		session.Close()
 		return nil, err
 	}
 
@@ -323,9 +385,17 @@ func (s *Session) dialUnixSocket(sockPath string) (net.Conn, error) {
 	}, nil
 }
 
+func (s *Session) UpdateClient(client *ssh.Client) {
+	s.client = client
+}
+
 func (s *Session) Close() {
 	if s.oldState != nil {
 		term.Restore(int(os.Stdin.Fd()), s.oldState)
+	}
+	if s.conn != nil {
+		s.conn.Close()
+		s.conn = nil
 	}
 	if s.client != nil {
 		s.client.Close()

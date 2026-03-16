@@ -144,7 +144,7 @@ func (s *Server) handleCreateSession(conn net.Conn, encoder *json.Encoder, decod
 
 	sessionID := generateSessionID()
 
-	session, err := NewSession(sessionID, req.Command, req.Cols, req.Rows)
+	session, err := NewSession(sessionID, req.Command, req.Cols, req.Rows, req.Term, req.Env)
 	if err != nil {
 		resp := protocol.CreateSessionResponse{
 			Success: false,
@@ -205,41 +205,55 @@ func (s *Server) handleSessionIO(conn net.Conn, encoder *json.Encoder, decoder *
 	}
 	defer session.Detach(dataCh)
 
+	doneCh := make(chan struct{})
+
+	// Read PTY output and send to client; detect session exit when channel is closed
 	go func() {
+		defer close(doneCh)
 		for data := range dataCh {
 			msg, _ := protocol.NewMessage(protocol.MessageTypeData, &protocol.DataPayload{Data: data})
 			encoder.Encode(msg)
 		}
+		// Channel was closed — session has exited
+		exitCode := session.ExitCode()
+		exitMsg, _ := protocol.NewMessage(protocol.MessageTypeExit, &protocol.ExitPayload{ExitCode: exitCode})
+		encoder.Encode(exitMsg)
 	}()
 
-	for {
-		var msg protocol.Message
-		if err := decoder.Decode(&msg); err != nil {
-			if err != io.EOF {
-				fmt.Fprintf(os.Stderr, "Session decode error: %v\n", err)
+	// Read client input and forward to PTY
+	go func() {
+		for {
+			var msg protocol.Message
+			if err := decoder.Decode(&msg); err != nil {
+				if err != io.EOF {
+					fmt.Fprintf(os.Stderr, "Session decode error: %v\n", err)
+				}
+				return
 			}
-			return
+
+			switch msg.Type {
+			case protocol.MessageTypeData:
+				var payload protocol.DataPayload
+				if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+					continue
+				}
+				session.Write(payload.Data)
+
+			case protocol.MessageTypeResize:
+				var payload protocol.ResizePayload
+				if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+					continue
+				}
+				session.Resize(payload.Cols, payload.Rows)
+
+			case protocol.MessageTypeExit:
+				return
+			}
 		}
+	}()
 
-		switch msg.Type {
-		case protocol.MessageTypeData:
-			var payload protocol.DataPayload
-			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-				continue
-			}
-			session.Write(payload.Data)
-
-		case protocol.MessageTypeResize:
-			var payload protocol.ResizePayload
-			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-				continue
-			}
-			session.Resize(payload.Cols, payload.Rows)
-
-		case protocol.MessageTypeExit:
-			return
-		}
-	}
+	// Wait for session exit (dataCh closed)
+	<-doneCh
 }
 
 func (s *Server) handleListSessions(encoder *json.Encoder) {

@@ -1,11 +1,12 @@
 package daemon
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -30,7 +31,7 @@ type Session struct {
 	rows      uint16
 }
 
-func NewSession(id string, command []string, cols, rows uint16) (*Session, error) {
+func NewSession(id string, command []string, cols, rows uint16, termType string, clientEnv map[string]string) (*Session, error) {
 	session := &Session{
 		ID:        id,
 		Command:   command,
@@ -40,18 +41,64 @@ func NewSession(id string, command []string, cols, rows uint16) (*Session, error
 		rows:      rows,
 	}
 
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/bash"
+	}
+
 	var cmd *exec.Cmd
 	if len(command) > 0 {
 		cmd = exec.Command(command[0], command[1:]...)
 	} else {
-		shell := os.Getenv("SHELL")
-		if shell == "" {
-			shell = "/bin/bash"
-		}
+		// Start as a login shell by setting argv[0] to "-shellname"
 		cmd = exec.Command(shell)
+		cmd.Args[0] = "-" + filepath.Base(shell)
 	}
 
-	cmd.Env = os.Environ()
+	// Build a proper environment like a real SSH session
+	currentUser, _ := user.Current()
+	homeDir := os.Getenv("HOME")
+	if homeDir == "" && currentUser != nil {
+		homeDir = currentUser.HomeDir
+	}
+	username := os.Getenv("USER")
+	if username == "" && currentUser != nil {
+		username = currentUser.Username
+	}
+
+	if termType == "" {
+		termType = "xterm-256color"
+	}
+
+	env := []string{
+		fmt.Sprintf("HOME=%s", homeDir),
+		fmt.Sprintf("USER=%s", username),
+		fmt.Sprintf("LOGNAME=%s", username),
+		fmt.Sprintf("SHELL=%s", shell),
+		fmt.Sprintf("TERM=%s", termType),
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+	}
+
+	// Preserve LANG/locale from daemon environment if not overridden by client
+	for _, key := range []string{"LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE"} {
+		if val, ok := clientEnv[key]; ok {
+			env = append(env, fmt.Sprintf("%s=%s", key, val))
+		} else if val := os.Getenv(key); val != "" {
+			env = append(env, fmt.Sprintf("%s=%s", key, val))
+		}
+	}
+
+	// Add any additional client environment variables
+	for key, val := range clientEnv {
+		// Skip ones we already handled
+		if key == "LANG" || key == "LANGUAGE" || key == "LC_ALL" || key == "LC_CTYPE" {
+			continue
+		}
+		env = append(env, fmt.Sprintf("%s=%s", key, val))
+	}
+
+	cmd.Env = env
+	cmd.Dir = homeDir
 
 	ptyFile, err := pty.Start(cmd)
 	if err != nil {
@@ -120,19 +167,11 @@ func (s *Session) broadcast(data []byte) {
 }
 
 func (s *Session) broadcastExit() {
-	msg, _ := protocol.NewMessage(protocol.MessageTypeExit, &protocol.ExitPayload{
-		ExitCode: s.exitCode,
-	})
-	data, _ := json.Marshal(msg)
-
 	s.clientsMu.RLock()
 	defer s.clientsMu.RUnlock()
 
 	for ch := range s.clients {
-		select {
-		case ch <- data:
-		default:
-		}
+		close(ch)
 	}
 }
 
@@ -223,4 +262,10 @@ func (s *Session) IsExited() bool {
 	s.Mutex.RLock()
 	defer s.Mutex.RUnlock()
 	return s.exited
+}
+
+func (s *Session) ExitCode() int {
+	s.Mutex.RLock()
+	defer s.Mutex.RUnlock()
+	return s.exitCode
 }

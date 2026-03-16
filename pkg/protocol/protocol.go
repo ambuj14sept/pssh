@@ -36,9 +36,11 @@ type HelloPayload struct {
 }
 
 type CreateSessionRequest struct {
-	Command []string `json:"command,omitempty"`
-	Cols    uint16   `json:"cols"`
-	Rows    uint16   `json:"rows"`
+	Command []string          `json:"command,omitempty"`
+	Cols    uint16            `json:"cols"`
+	Rows    uint16            `json:"rows"`
+	Term    string            `json:"term,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
 }
 
 type CreateSessionResponse struct {

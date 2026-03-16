@@ -1,8 +1,9 @@
 # Binaries
 bin/
 pkg/client/psshd
-pssh
-psshd
+pkg/client/psshd_linux_*
+/pssh
+/psshd
 *.exe
 
 # Go

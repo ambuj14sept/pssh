@@ -28,9 +28,10 @@ func main() {
 		Long: `pssh is a drop-in SSH replacement that provides VS Code-like session persistence.
 
 Your sessions survive connection drops, laptop sleep, and WiFi changes - automatically.`,
-		Version: version,
-		Run:     runConnect,
-		Args:    cobra.ArbitraryArgs,
+		Version:          version,
+		Run:              runConnect,
+		Args:             cobra.ArbitraryArgs,
+		TraverseChildren: true,
 	}
 
 	rootCmd.PersistentFlags().IntVarP(&port, "port", "p", 22, "SSH port")
@@ -160,6 +161,8 @@ func runWithReconnect(session *client.Session, sshClient *client.SSHClient, user
 		if err != nil {
 			continue
 		}
+
+		session.UpdateClient(newClientConn)
 
 		err = session.Attach(sessionID)
 		if err != nil {
@@ -398,21 +401,17 @@ func buildSSHOptions() map[string]string {
 }
 
 func printConnecting(host, user string) {
-	fmt.Printf("%s Connecting to %s%s%s as %s%s%s\n",
+	fmt.Printf("%s Connecting to %s as %s\n",
 		color.CyanString("[pssh]"),
 		color.New(color.Bold).Sprint(host),
-		color.New(color.Faint).Sprint(""),
-		color.New(color.Faint).Sprint(""),
 		color.New(color.Bold).Sprint(user),
-		color.New(color.Faint).Sprint(""),
 	)
 }
 
 func printConnected(sessionID string) {
-	fmt.Printf("%s Session %s%s%s established. Type exit to end.\n",
+	fmt.Printf("%s Session %s established. Type exit to end.\n",
 		color.CyanString("[pssh]"),
 		color.New(color.Bold).Sprint(sessionID),
-		color.New(color.Faint).Sprint(""),
 	)
 	fmt.Println()
 }

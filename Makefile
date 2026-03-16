@@ -10,22 +10,26 @@ GOFLAGS := -ldflags="-s -w -X main.version=$(VERSION)"
 
 all: build
 
-build: build-daemon build-client
+build: build-daemons build-client
 
-build-daemon:
-	@echo "Building daemon..."
+build-daemons:
+	@echo "Building daemon (linux/amd64)..."
 	@mkdir -p bin
-	@$(GO) build $(GOFLAGS) -o bin/$(DAEMON) ./cmd/$(DAEMON)
+	@GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO) build $(GOFLAGS) -o bin/$(DAEMON)_linux_amd64 ./cmd/$(DAEMON)
+	@echo "Building daemon (linux/arm64)..."
+	@GOOS=linux GOARCH=arm64 CGO_ENABLED=0 $(GO) build $(GOFLAGS) -o bin/$(DAEMON)_linux_arm64 ./cmd/$(DAEMON)
 
-build-client: build-daemon
+build-client: build-daemons
 	@echo "Building client..."
-	@cp bin/$(DAEMON) pkg/client/psshd
+	@cp bin/$(DAEMON)_linux_amd64 pkg/client/psshd_linux_amd64
+	@cp bin/$(DAEMON)_linux_arm64 pkg/client/psshd_linux_arm64
 	@$(GO) build $(GOFLAGS) -o bin/$(BINARY) ./cmd/$(BINARY)
 
 clean:
 	@echo "Cleaning..."
 	@rm -rf bin/
-	@rm -f pkg/client/psshd
+	@rm -f pkg/client/psshd_linux_amd64
+	@rm -f pkg/client/psshd_linux_arm64
 
 install: build
 	@echo "Installing to $(INSTALL_DIR)..."

@@ -44,6 +44,17 @@ func (sm *SessionManager) ListSessions() ([]protocol.SessionInfo, error) {
 		return nil, err
 	}
 
+	// Read hello ack
+	var helloResp protocol.Message
+	if err := decoder.Decode(&helloResp); err != nil {
+		return nil, fmt.Errorf("failed to read hello response: %w", err)
+	}
+	if helloResp.Type == protocol.MessageTypeError {
+		var errPayload protocol.ErrorPayload
+		json.Unmarshal(helloResp.Payload, &errPayload)
+		return nil, fmt.Errorf("hello rejected: %s", errPayload.Error)
+	}
+
 	msg, _ := protocol.NewMessage(protocol.MessageTypeListSessions, &protocol.ListSessionsRequest{})
 	if err := encoder.Encode(msg); err != nil {
 		return nil, err
@@ -88,6 +99,17 @@ func (sm *SessionManager) KillSession(sessionID string, killAll bool) error {
 		return err
 	}
 
+	// Read hello ack
+	var helloResp protocol.Message
+	if err := decoder.Decode(&helloResp); err != nil {
+		return fmt.Errorf("failed to read hello response: %w", err)
+	}
+	if helloResp.Type == protocol.MessageTypeError {
+		var errPayload protocol.ErrorPayload
+		json.Unmarshal(helloResp.Payload, &errPayload)
+		return fmt.Errorf("hello rejected: %s", errPayload.Error)
+	}
+
 	req := protocol.KillSessionRequest{
 		SessionID: sessionID,
 		KillAll:   killAll,
@@ -117,20 +139,25 @@ func (sm *SessionManager) dialDaemon(sockPath string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer session.Close()
+	// NOTE: Do NOT defer session.Close() here. The session's lifetime is
+	// managed by the returned sshUnixSocket, whose Close() method handles
+	// closing the session.
 
 	stdin, err := session.StdinPipe()
 	if err != nil {
+		session.Close()
 		return nil, err
 	}
 
 	stdout, err := session.StdoutPipe()
 	if err != nil {
+		session.Close()
 		return nil, err
 	}
 
 	err = session.Start(fmt.Sprintf("nc -U %s", sockPath))
 	if err != nil {
+		session.Close()
 		return nil, err
 	}
 
