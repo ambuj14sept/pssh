@@ -30,6 +30,7 @@ func main() {
 Your sessions survive connection drops, laptop sleep, and WiFi changes - automatically.`,
 		Version: version,
 		Run:     runConnect,
+		Args:    cobra.ArbitraryArgs,
 	}
 
 	rootCmd.PersistentFlags().IntVarP(&port, "port", "p", 22, "SSH port")
